@@ -1,0 +1,6 @@
+//Проверка темы прямо с CD без установки: один кадр компоновщика.
+#define TH_DIR "T:/Theme/Assets/"
+U0 (*fp_theme_update32)();
+#include "T:/Theme/Theme"
+ThemeOn;
+ThemeUpdate32;

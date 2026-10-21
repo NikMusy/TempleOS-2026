@@ -1,0 +1,7 @@
+//Update TempleOS 2026 files from CD without kernel rebuild. Run: #include "T:/Update";
+CopyTree("T:/Theme", "C:/Home/Theme");
+Copy("T:/Home/HomeSys.ZC", "C:/Home/HomeSys.ZC");
+Copy("T:/Home/Once.ZC", "C:/Home/Once.ZC");
+Copy("T:/Sys/GrScreen.ZC", "C:/System/Gr/GrScreen.ZC");
+Copy("T:/Sys/Win.ZC", "C:/System/Win.ZC");
+"\nUpdated. Reboot;\n";

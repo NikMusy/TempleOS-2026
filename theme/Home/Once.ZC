@@ -1,0 +1,13 @@
+//Приветствие TempleOS 2026 в первом терминале.
+
+U0 Welcome()
+{
+	"\n$$LTBLUE$$  TempleOS 2026$$FG$$  $$DKGRAY$$built on ZealOS$$FG$$\n\n";
+	"  Dock below:  Terminal, Files, Notes, Games, Graphics, Oracle, Help\n";
+	"  $$LTCYAN$$Ctrl+M$$FG$$ personal menu     $$LTCYAN$$Alt+M$$FG$$ maximize     $$LTCYAN$$Ctrl+Alt+X$$FG$$ close window\n";
+	"  $$LTCYAN$$F7$$FG$$ God word          $$LTCYAN$$F6$$FG$$ God song      $$LTCYAN$$Reboot;$$FG$$ restart\n";
+	"  $$LTCYAN$$ThemeOff;$$FG$$ classic look   $$LTCYAN$$ThemeOn;$$FG$$ back to 2026\n\n";
+	Dir;
+}
+
+Welcome;

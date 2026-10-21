@@ -1,0 +1,8 @@
+src/
+vm/
+shots/
+*.iso
+*.ISO
+theme/Theme/Assets/
+wallpaper_preview.png
+__pycache__/

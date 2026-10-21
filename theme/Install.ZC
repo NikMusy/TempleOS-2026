@@ -1,0 +1,23 @@
+//Установщик TempleOS 2026 с CD. Запуск: #include "T:/Install";
+
+U0 Temple2026Install(Bool kernel=TRUE)
+{
+	CTask *task;
+
+	"Copying theme...\n";
+	CopyTree("T:/Theme", "C:/Home/Theme");
+	Copy("T:/Home/HomeSys.ZC", "C:/Home/HomeSys.ZC");
+	Copy("T:/Home/Once.ZC", "C:/Home/Once.ZC");
+	Copy("T:/Sys/GrScreen.ZC", "C:/System/Gr/GrScreen.ZC");
+	Copy("T:/Sys/Win.ZC", "C:/System/Win.ZC");
+	if (kernel)
+	{
+		Copy("T:/Sys/KStart16.ZC", "C:/Kernel/KStart16.ZC");
+		"Rebuilding kernel for 1920x1080...\n";
+		task = User;
+		XTalkWait(task, "BootHDIns('C');\n\nB\n0x20000\nC\n0\nT1\n\n\n\n");
+	}
+	"\n$$LTGREEN$$TempleOS 2026 installed. Reboot;$$FG$$\n";
+}
+
+Temple2026Install;

@@ -1,0 +1,697 @@
+// TempleOS 2026: 32-битный компоновщик поверх ZealOS.
+// Обои, тени и скруглённые окна, стеклянная верхняя панель и док.
+// Подключается из ~/HomeSys.ZC, рисует через хук fp_theme_update32 в GrScreen.ZC.
+
+#ifndef TH_DIR
+#define TH_DIR		"~/Theme/Assets/"
+#endif
+#define TH_BAR_H	32
+#define TH_DOCK_H	80
+#define TH_RAD		8
+#define TH_SH_R		22
+#define TH_SH_OFF	6
+#define TH_SLOTS	64
+#define TH_ICONS	7
+
+#define M_WIN		0
+#define M_CHROME	1
+#define M_DESK		16
+#define M_FORCE		48
+#define M_BORDER	64
+
+class CThSlot
+{
+	I64 x0, y0, x1, y1, fg, bg;
+	U32 body, title, outline;
+	Bool focus;
+};
+
+class CThFont
+{
+	I64 h, asc;
+	U8 adv[95];
+	U8 *glyph[95];
+};
+
+class CThImg
+{
+	I64 w, h;
+	U32 *px;
+};
+
+U32 *th_wall = NULL, *th_glass, *th_chrome;
+U8	*th_mask, *th_prev;
+I64	 th_w, th_h, th_size, th_desk = WHITE, th_sig = 0, th_full = TRUE;
+I64	 th_dirty_y0 = 0, th_dirty_y1 = -1, th_minute = -1, th_hover = -1, th_dock_hover = -2;
+U8	 th_focus_title[STR_LEN];
+I64	 th_shade_mul[16];
+U8	 th_isline[256], th_lut[TH_SH_R + 1][TH_SH_R + 1], th_inset[TH_RAD];
+CThSlot th_slots[TH_SLOTS];
+CThFont th_font, th_fontb;
+CThImg	th_icon[TH_ICONS], th_logo;
+I64		th_dock_x0, th_dock_y0, th_dock_x1, th_dock_y1;
+
+U8 *th_icon_files[TH_ICONS] = {"ITERM", "IFILES", "IEDIT", "IGAMES", "IPAINT", "IORACLE", "IHELP"};
+U8 *th_icon_names[TH_ICONS] = {"Terminal", "Files", "Notes", "Games", "Graphics", "Oracle", "Help"};
+
+public CBGR24 th_palette[COLORS_NUM] = {
+	0xE6E9F5, 0xC0CAF5, 0x9ECE6A, 0x73DACA, 0xF7768E, 0xBB9AF7, 0xE0AF68, 0x2A2F45,
+	0x565F89, 0x7AA2F7, 0xB9F27C, 0x7DCFFF, 0xFF9E64, 0xD4BFFF, 0xFFD580, 0x161925
+};
+
+public U0 PaletteSetTemple2026(Bool persistent=TRUE)
+{
+	GrPaletteSet(th_palette);
+	LFBFlush;
+	if (persistent)
+		fp_set_std_palette = &PaletteSetTemple2026;
+}
+
+U32 ThBlend(U32 dst, U32 src, I64 a)
+{//a: 0..255, сколько src поверх dst.
+//В HolyC сдвиги связывают сильнее умножения, поэтому всё в скобках.
+	I64 ia = 255 - a, r, g, b;
+	r = (((src >> 16) & 0xFF) * a + ((dst >> 16) & 0xFF) * ia) / 255;
+	g = (((src >> 8) & 0xFF) * a + ((dst >> 8) & 0xFF) * ia) / 255;
+	b = ((src & 0xFF) * a + (dst & 0xFF) * ia) / 255;
+	return (r << 16) | (g << 8) | b;
+}
+
+U32 ThShade(U32 p, I64 l)
+{
+	I64 m = th_shade_mul[l], r, g, b;
+	r = (((p >> 16) & 0xFF) * m) >> 8;
+	g = (((p >> 8) & 0xFF) * m) >> 8;
+	b = ((p & 0xFF) * m) >> 8;
+	return (r << 16) | (g << 8) | b;
+}
+
+//******************************** Загрузка ресурсов ********************************
+
+U32 *ThLoadScreen(U8 *name)
+{//Читает картинку 1920x1080 и растягивает до текущего разрешения.
+	U8	*path = MStrPrint("%s%s.BGRA", TH_DIR, name);
+	U32 *raw = FileRead(path), *res = MAlloc(th_size * sizeof(U32), sys_task), *px;
+	I64  w, h, x, y;
+
+	Free(path);
+	if (!raw)
+	{
+		MemSetU32(res, 0x101320, th_size);
+		return res;
+	}
+	w = raw[0];
+	h = raw[1];
+	px = raw + 2;
+	for (y = 0; y < th_h; y++)
+		for (x = 0; x < th_w; x++)
+			res[x + y * th_w] = px[x * w / th_w + (y * h / th_h) * w];
+	Free(raw);
+	return res;
+}
+
+U0 ThLoadImg(CThImg *img, U8 *name)
+{
+	U8	*path = MStrPrint("%s%s.BGRA", TH_DIR, name);
+	U32 *raw = FileRead(path);
+
+	Free(path);
+	if (raw)
+	{
+		img->w = raw[0];
+		img->h = raw[1];
+		img->px = MAlloc(img->w * img->h * sizeof(U32), sys_task);
+		MemCopy(img->px, raw + 2, img->w * img->h * sizeof(U32));
+		Free(raw);
+	}
+	else
+	{
+		img->w = img->h = 0;
+		img->px = NULL;
+	}
+}
+
+U0 ThLoadFont(CThFont *f, U8 *name)
+{
+	U8 *path = MStrPrint("%s%s", TH_DIR, name), *raw = FileRead(path), *ptr, *mem;
+	I64 i, size = 0;
+
+	Free(path);
+	MemSet(f, 0, sizeof(CThFont));
+	if (!raw)
+		return;
+	f->h = raw(U32 *)[0];
+	f->asc = raw(U32 *)[1];
+	MemCopy(f->adv, raw + 8, 95);
+	for (i = 0; i < 95; i++)
+		size += f->adv[i] * f->h;
+	mem = MAlloc(size, sys_task);
+	MemCopy(mem, raw + 8 + 95, size);
+	ptr = mem;
+	for (i = 0; i < 95; i++)
+	{
+		f->glyph[i] = ptr;
+		ptr += f->adv[i] * f->h;
+	}
+	Free(raw);
+}
+
+//******************************** Рисование в chrome ********************************
+
+I64 ThTextWidth(CThFont *f, U8 *st)
+{
+	I64 w = 0, ch;
+
+	while (ch = *st++)
+		if (32 <= ch < 127)
+			w += f->adv[ch - 32];
+	return w;
+}
+
+U0 ThText(CThFont *f, I64 x, I64 y, U8 *st, U32 color)
+{//y: верх строки текста.
+	I64 ch, gx, gy, a, w;
+	U8 *g;
+	U32 *row;
+
+	if (!f->h)
+		return;
+	while (ch = *st++)
+	{
+		if (32 <= ch < 127)
+		{//в HolyC нет continue
+			w = f->adv[ch - 32];
+			g = f->glyph[ch - 32];
+			for (gy = 0; gy < f->h; gy++)
+				if (0 <= y + gy < th_h)
+				{
+					row = th_chrome + (y + gy) * th_w;
+					for (gx = 0; gx < w; gx++)
+						if ((a = g[gx + gy * w]) && 0 <= x + gx < th_w)
+							row[x + gx] = ThBlend(row[x + gx], color, a);
+				}
+			x += w;
+		}
+	}
+}
+
+U0 ThImg(CThImg *img, I64 x, I64 y)
+{
+	I64 ix, iy, a;
+	U32 p, *row;
+
+	for (iy = 0; iy < img->h; iy++)
+		if (0 <= y + iy < th_h)
+		{
+			row = th_chrome + (y + iy) * th_w;
+			for (ix = 0; ix < img->w; ix++)
+			{
+				p = img->px[ix + iy * img->w];
+				if ((a = p >> 24) && 0 <= x + ix < th_w)
+					row[x + ix] = ThBlend(row[x + ix], p & 0xFFFFFF, a);
+			}
+		}
+}
+
+Bool ThInRound(I64 x, I64 y, I64 x0, I64 y0, I64 x1, I64 y1, I64 r, I64 *_edge)
+{//Точка внутри скруглённого прямоугольника? _edge: 1 если на внешнем пикселе.
+	I64 cx, cy, dx = 0, dy = 0, d2;
+
+	if (x < x0 || x > x1 || y < y0 || y > y1)
+		return FALSE;
+	if (x < x0 + r)
+		dx = x0 + r - x;
+	else if (x > x1 - r)
+		dx = x - (x1 - r);
+	if (y < y0 + r)
+		dy = y0 + r - y;
+	else if (y > y1 - r)
+		dy = y - (y1 - r);
+	d2 = dx * dx + dy * dy;
+	if (d2 > r * r)
+		return FALSE;
+	if (_edge)
+		*_edge = d2 > (r - 1) * (r - 1) || x == x0 || x == x1 || y == y0 || y == y1;
+	return TRUE;
+}
+
+U0 ThRoundRect(I64 x0, I64 y0, I64 x1, I64 y1, I64 r, U32 fill, I64 fill_a, U32 line, I64 line_a)
+{
+	I64 x, y, edge;
+	U32 *p;
+
+	for (y = MaxI64(y0, 0); y <= MinI64(y1, th_h - 1); y++)
+		for (x = MaxI64(x0, 0); x <= MinI64(x1, th_w - 1); x++)
+			if (ThInRound(x, y, x0, y0, x1, y1, r, &edge))
+			{
+				p = &th_chrome[x + y * th_w];
+				*p = ThBlend(*p, fill, fill_a);
+				if (edge && line_a)
+					*p = ThBlend(*p, line, line_a);
+			}
+}
+
+U0 ThSoftShadow(I64 x0, I64 y0, I64 x1, I64 y1, I64 r, I64 strength)
+{
+	I64 x, y, dx, dy, d;
+
+	for (y = MaxI64(y0 - r, 0); y <= MinI64(y1 + r, th_h - 1); y++)
+		for (x = MaxI64(x0 - r, 0); x <= MinI64(x1 + r, th_w - 1); x++)
+		{
+			dx = MaxI64(MaxI64(x0 - x, x - x1), 0);
+			dy = MaxI64(MaxI64(y0 - y, y - y1), 0);
+			d = Sqrt(dx * dx + dy * dy);
+			if (d < r)
+				th_chrome[x + y * th_w] = ThBlend(th_chrome[x + y * th_w], 0, strength * (r - d) * (r - d) / (r * r));
+		}
+}
+
+U0 ThDrawBar()
+{
+	CDateStruct ds;
+	U8 buf[STR_LEN], *days = "Sun\0Mon\0Tue\0Wed\0Thu\0Fri\0Sat\0", *mons = "Jan\0Feb\0Mar\0Apr\0May\0Jun\0Jul\0Aug\0Sep\0Oct\0Nov\0Dec\0";
+	I64 y, x, ty;
+
+	MemCopy(th_chrome, th_glass, th_w * TH_BAR_H * sizeof(U32));
+	for (x = 0; x < th_w; x++)
+		th_chrome[x + (TH_BAR_H - 1) * th_w] = ThBlend(th_chrome[x + (TH_BAR_H - 1) * th_w], 0xFFFFFF, 26);
+	ty = (TH_BAR_H - th_font.h) / 2;
+	if (th_logo.px)
+		ThImg(&th_logo, 12, (TH_BAR_H - th_logo.h) / 2);
+	ThText(&th_fontb, 42, ty, "TempleOS", 0xFFFFFF);
+	x = 42 + ThTextWidth(&th_fontb, "TempleOS") + 16;
+	ThText(&th_font, x, ty, th_focus_title, 0xC8CEE8);
+
+	if (0 <= th_dock_hover < TH_ICONS)
+	{
+		x = (th_w - ThTextWidth(&th_font, th_icon_names[th_dock_hover])) / 2;
+		ThRoundRect(x - 12, 5, x + ThTextWidth(&th_font, th_icon_names[th_dock_hover]) + 12, TH_BAR_H - 6, 10,
+					0xFFFFFF, 30, 0xFFFFFF, 40);
+		ThText(&th_font, x, ty, th_icon_names[th_dock_hover], 0xFFFFFF);
+	}
+
+	Date2Struct(&ds, Now);
+	StrPrint(buf, "%s %d %s    %02d:%02d", ListSub(ds.day_of_week, days), ds.day_of_mon,
+				ListSub(ds.mon - 1, mons), ds.hour, ds.min);
+	ThText(&th_font, th_w - ThTextWidth(&th_font, buf) - 16, ty, buf, 0xFFFFFF);
+	StrPrint(buf, "CPU %d%%", ToI64(100.0 * (1.0 - cpu_structs[0].idle_factor)));
+	ThText(&th_font, th_w - 230, ty, buf, 0x9AA5CE);
+	th_minute = ds.min;
+	th_dirty_y0 = 0;
+	th_dirty_y1 = MaxI64(th_dirty_y1, TH_BAR_H - 1);
+}
+
+U0 ThDrawDock()
+{
+	I64 i, x, y, w = TH_ICONS * 60 + 14, y0 = th_h - TH_DOCK_H;
+
+	MemCopy(th_chrome + y0 * th_w, th_wall + y0 * th_w, th_w * TH_DOCK_H * sizeof(U32));
+	th_dock_x0 = (th_w - w) / 2;
+	th_dock_x1 = th_dock_x0 + w - 1;
+	th_dock_y1 = th_h - 9;
+	th_dock_y0 = th_dock_y1 - 63;
+	ThSoftShadow(th_dock_x0, th_dock_y0 + 6, th_dock_x1, th_dock_y1 + 4, 14, 120);
+	for (y = th_dock_y0; y <= th_dock_y1; y++)
+		for (x = th_dock_x0; x <= th_dock_x1; x++)
+			if (ThInRound(x, y, th_dock_x0, th_dock_y0, th_dock_x1, th_dock_y1, 22, NULL))
+				th_chrome[x + y * th_w] = th_glass[x + y * th_w];
+	ThRoundRect(th_dock_x0, th_dock_y0, th_dock_x1, th_dock_y1, 22, 0xFFFFFF, 18, 0xFFFFFF, 46);
+	for (i = 0; i < TH_ICONS; i++)
+	{
+		x = th_dock_x0 + 14 + i * 60;
+		y = th_dock_y0 + 8;
+		if (i == th_dock_hover)
+		{
+			ThRoundRect(x - 4, y - 4, x + 51, y + 51, 14, 0xFFFFFF, 38, 0xFFFFFF, 0);
+			y -= 3;
+		}
+		if (th_icon[i].px)
+			ThImg(&th_icon[i], x, y);
+	}
+	th_dirty_y0 = MinI64(th_dirty_y0, y0);
+	th_dirty_y1 = th_h - 1;
+}
+
+//******************************** Маска окон ********************************
+
+I64 ThSignature()
+{
+	CTask *task = sys_winmgr_task->next_task;
+	I64 sig = sys_focus_task(I64) * 7 + th_w;
+
+	while (task != sys_winmgr_task)
+	{
+		if (!TaskValidate(task))
+			break;
+		if (Bt(&task->display_flags, DISPLAYf_SHOW))
+			sig = sig * 31 + task(I64) + task->win_left * 3 + task->win_right * 5 + task->win_top * 7 +
+				  task->win_bottom * 11 + task->display_flags * 13 + task->border_attr * 17 + task->text_attr;
+		task = task->next_task;
+	}
+	return sig;
+}
+
+U0 ThMaskShadow(I64 x0, I64 y0, I64 x1, I64 y1)
+{
+	I64 x, y, dx, dy, l, old;
+	U8 *m;
+
+	y0 += TH_SH_OFF;
+	y1 += TH_SH_OFF;
+	for (y = MaxI64(y0 - TH_SH_R, 0); y <= MinI64(y1 + TH_SH_R, th_h - 1); y++)
+	{
+		m = th_mask + y * th_w;
+		dy = MaxI64(MaxI64(y0 - y, y - y1), 0);
+		for (x = MaxI64(x0 - TH_SH_R, 0); x <= MinI64(x1 + TH_SH_R, th_w - 1); x++)
+		{
+			dx = MaxI64(MaxI64(x0 - x, x - x1), 0);
+			if (dx <= TH_SH_R && dy <= TH_SH_R)
+			{
+				l = th_lut[dx][dy];
+				old = m[x];
+				if (M_DESK <= old < M_BORDER && l > old & 15)
+					m[x] = old & ~15 | l;
+				if (!dx && !dy)
+					x = MaxI64(x, x1 - 1); //внутри тень не нужна
+			}
+		}
+	}
+}
+
+U0 ThMaskWin(CTask *task, I64 slot)
+{
+	I64 x0, y0, x1, y1, y, x, ins, old, code;
+	Bool border = !Bt(&task->display_flags, DISPLAYf_NO_BORDER);
+	U8 *m;
+	CThSlot *s;
+
+	if (border)
+	{
+		x0 = (task->win_left - 1) * FONT_WIDTH;
+		x1 = (task->win_right + 2) * FONT_WIDTH - 1;
+		y0 = (task->win_top - 1) * FONT_HEIGHT;
+		y1 = (task->win_bottom + 2) * FONT_HEIGHT - 1;
+	}
+	else
+	{
+		x0 = task->win_left * FONT_WIDTH;
+		x1 = (task->win_right + 1) * FONT_WIDTH - 1;
+		y0 = task->win_top * FONT_HEIGHT;
+		y1 = (task->win_bottom + 1) * FONT_HEIGHT - 1;
+	}
+	if (x1 < 0 || y1 < 0 || x0 >= th_w || y0 >= th_h || x0 > x1 || y0 > y1)
+		return;
+	if (x1 - x0 < th_w - 16 || y1 - y0 < th_h - 16)
+		ThMaskShadow(x0, y0, x1, y1);
+
+	code = M_WIN;
+	if (border && slot < TH_SLOTS)
+	{
+		s = &th_slots[slot];
+		s->x0 = x0;
+		s->y0 = y0;
+		s->x1 = x1;
+		s->y1 = y1;
+		s->fg = task->border_attr & 15;
+		s->bg = task->border_attr >> 4 & 15;
+		s->focus = task == sys_focus_task;
+		s->body = gr_palette[task->text_attr >> 4 & 15];
+		s->title = ThBlend(s->body, 0xFFFFFF, s->focus * 14 + 8);
+		s->outline = ThBlend(s->body, 0xFFFFFF, s->focus * 40 + 26);
+		code = M_BORDER + slot;
+	}
+	for (y = MaxI64(y0, 0); y <= MinI64(y1, th_h - 1); y++)
+	{
+		m = th_mask + y * th_w;
+		ins = 0;
+		if (border)
+		{
+			if (y - y0 < TH_RAD)
+				ins = th_inset[y - y0];
+			else if (y1 - y < TH_RAD)
+				ins = th_inset[y1 - y];
+		}
+		for (x = MaxI64(x0, 0); x <= MinI64(x1, th_w - 1); x++)
+		{
+			if (x < x0 + ins || x > x1 - ins)
+			{//вырез скругления: показываем то, что под окном
+				old = m[x];
+				if (M_DESK <= old < M_DESK + 16)
+					m[x] = old + M_FORCE - M_DESK;
+			}
+			else if (code != M_WIN && (y < y0 + FONT_HEIGHT || y > y1 - FONT_HEIGHT || x < x0 + FONT_WIDTH ||
+								  x > x1 - FONT_WIDTH))
+				m[x] = code;
+			else
+				m[x] = M_WIN;
+			if (y >= y0 + FONT_HEIGHT && y <= y1 - FONT_HEIGHT && x == x0 + FONT_WIDTH && x1 - FONT_WIDTH > x)
+			{//середину строки заполняем разом
+				MemSet(m + x, M_WIN, x1 - FONT_WIDTH - x + 1);
+				x = x1 - FONT_WIDTH;
+			}
+		}
+	}
+}
+
+U0 ThBuildMask()
+{
+	CTask *task = sys_winmgr_task->next_task;
+	I64 slot = 0, i;
+
+	MemSet(th_mask, M_DESK, th_size);
+	while (task != sys_winmgr_task)
+	{
+		if (!TaskValidate(task))
+			break;
+		if (Bt(&task->display_flags, DISPLAYf_SHOW))
+			ThMaskWin(task, slot++);
+		task = task->next_task;
+	}
+	for (i = 0; i < th_w * TH_BAR_H; i++)
+		if (M_DESK <= th_mask[i] < M_BORDER)
+			th_mask[i] = M_CHROME;
+	for (i = (th_h - TH_DOCK_H) * th_w; i < th_size; i++)
+		if (M_DESK <= th_mask[i] < M_BORDER)
+			th_mask[i] = M_CHROME;
+	th_full = TRUE;
+}
+
+//******************************** Компоновщик ********************************
+
+U32 ThBorderPx(I64 code, I64 x, I64 y, I64 c)
+{
+	CThSlot *s = &th_slots[code - M_BORDER];
+	I64 ch = gr.text_base[(y / FONT_HEIGHT) * TEXT_COLS + x / FONT_WIDTH] & 0xFF, edge = FALSE;
+	U32 bg;
+
+	if (c != s->fg && c != s->bg)
+		return gr_palette[c];
+	ThInRound(x, y, s->x0, s->y0, s->x1, s->y1, TH_RAD, &edge);
+	if (edge)
+		return s->outline;
+	if (y < s->y0 + FONT_HEIGHT)
+		bg = s->title;
+	else
+		bg = s->body;
+	if (th_isline[ch] || c == s->bg)
+		return bg;
+	return gr_palette[c]; //буквы заголовка
+}
+
+U0 ThemeUpdate32()
+{
+	U8 *src = gr.dc2->body, *m = th_mask, *prev = th_prev;
+	U32 *raw = text.raw_screen, *fb = text.fb_alias, p;
+	I64 x, y, i, k, c, code, sig, row, frow, x8;
+	CDateStruct ds;
+	Bool full_row;
+
+	sig = ThSignature;
+	if (sig != th_sig)
+	{
+		th_sig = sig;
+		ThBuildMask;
+		if (sys_focus_task && TaskValidate(sys_focus_task))
+		{
+			StrPrint(th_focus_title, "%s", sys_focus_task->task_title);
+			if (StrLen(th_focus_title) > 80)
+				StrCopy(th_focus_title + 77, "...");
+		}
+		else
+			*th_focus_title = 0;
+		ThDrawBar;
+	}
+	if (th_hover != th_dock_hover)
+	{
+		th_dock_hover = th_hover;
+		ThDrawDock;
+		ThDrawBar;
+	}
+	Date2Struct(&ds, Now);
+	if (ds.min != th_minute || !(winmgr.updates & 63))
+		ThDrawBar;
+
+	for (y = 0; y < th_h; y++)
+	{
+		row = y * th_w;
+		frow = y * sys_framebuffer_pidth;
+		full_row = th_full || th_dirty_y0 <= y <= th_dirty_y1;
+		for (x8 = 0; x8 < th_w; x8 += 8)
+		{
+			i = row + x8;
+			if (full_row || *(src + i)(U64 *) != *(prev + i)(U64 *))
+			for (k = 0; k < 8; k++)
+			{
+				i = row + x8 + k;
+				c = src[i];
+				code = m[i];
+				x = x8 + k;
+				if (code == M_WIN)
+					p = gr_palette[c];
+				else if (code == M_CHROME)
+				{
+					if (c == th_desk)
+						p = th_chrome[i];
+					else
+						p = gr_palette[c];
+				}
+				else if (code < M_FORCE)
+				{
+					if (c == th_desk)
+						p = th_wall[i];
+					else
+						p = gr_palette[c];
+					if (code & 15)
+						p = ThShade(p, code & 15);
+				}
+				else if (code < M_BORDER)
+					p = ThShade(th_wall[i], code & 15);
+				else
+					p = ThBorderPx(code, x, y, c);
+				raw[frow + x] = p;
+				fb[frow + x] = p;
+			}
+		}
+	}
+	MemCopy(prev, src, th_size);
+	th_full = FALSE;
+	th_dirty_y0 = th_h;
+	th_dirty_y1 = -1;
+}
+
+//******************************** Обои и док ********************************
+
+U0 ThemeWallPaper(CTask *_task)
+{//Рабочий стол пустой: его рисует компоновщик.
+	_task->text_attr = th_desk << 4 + BLUE;
+}
+
+U0 ThLaunch(I64 i)
+{
+	switch (i)
+	{
+		case 0: User; break;
+		case 1: User("FileMgr;\n"); break;
+		case 2: User("Ed(\"~/Notes.DD\");\n"); break;
+		case 3: User("Cd(\"::/Demo/Games\");Dir;\n"); break;
+		case 4: User("Cd(\"::/Demo/Graphics\");Dir;\n"); break;
+		case 5: User("GodWord;\n"); break;
+		case 6: User("Help;\n"); break;
+	}
+}
+
+U0 ThemeTask(U8 *)
+{
+	I64 h, mx, my;
+	Bool was_down = FALSE;
+
+	while (TRUE)
+	{
+		mx = mouse.pos.x;
+		my = mouse.pos.y;
+		h = -1;
+		if (th_dock_y0 <= my <= th_dock_y1 && th_dock_x0 + 14 <= mx < th_dock_x0 + 14 + TH_ICONS * 60 &&
+			0 <= mx < th_w && 0 <= my < th_h && th_mask[mx + my * th_w] == M_CHROME)
+		{
+			h = (mx - th_dock_x0 - 14) / 60;
+			if ((mx - th_dock_x0 - 14) % 60 > 50)
+				h = -1;
+		}
+		th_hover = h;
+		if (mouse.lb)
+			was_down = TRUE;
+		else if (was_down)
+		{
+			was_down = FALSE;
+			if (h >= 0)
+				ThLaunch(h);
+		}
+		Sleep(20);
+	}
+}
+
+//******************************** Запуск ********************************
+
+public U0 ThemeOff()
+{
+	fp_theme_update32 = NULL;
+	gr.fp_wall_paper = &WallPaper;
+	PaletteSetSlate;
+	LFBFlush;
+}
+
+public U0 ThemeOn()
+{
+	I64 i, dx, dy, d;
+	F64 t;
+
+	th_w = GR_WIDTH;
+	th_h = GR_HEIGHT;
+	th_size = th_w * th_h;
+	if (!th_wall)
+	{
+		th_wall	  = ThLoadScreen("WALL");
+		th_glass  = ThLoadScreen("GLASS");
+		th_chrome = CAlloc(th_size * sizeof(U32), sys_task);
+		th_mask	  = CAlloc(th_size, sys_task);
+		th_prev	  = CAlloc(th_size, sys_task);
+		for (i = 0; i < TH_ICONS; i++)
+			ThLoadImg(&th_icon[i], th_icon_files[i]);
+		ThLoadImg(&th_logo, "LOGO");
+		ThLoadFont(&th_font, "FONT.BIN");
+		ThLoadFont(&th_fontb, "FONTB.BIN");
+	}
+	for (i = 0; i < 16; i++)
+		th_shade_mul[i] = 256 - i * 9;
+	for (dx = 0; dx <= TH_SH_R; dx++)
+		for (dy = 0; dy <= TH_SH_R; dy++)
+		{
+			t = 1.0 - Sqrt(dx * dx + dy * dy) / TH_SH_R;
+			if (t < 0)
+				t = 0;
+			th_lut[dx][dy] = ToI64(t * t * 11.0);
+		}
+	for (i = 0; i < TH_RAD; i++)
+	{
+		d = TH_RAD - i;
+		th_inset[i] = TH_RAD - ToI64(Sqrt(TH_RAD * TH_RAD - (d - 0.5) * (d - 0.5)) + 0.5);
+	}
+	MemSet(th_isline, 0, 256);
+	for (i = 2; i < 14; i++)
+		th_isline[text.border_chars[i]] = TRUE;
+	th_isline[0] = TRUE;
+	th_isline[' '] = TRUE;
+
+	th_sig = 0;
+	th_dock_hover = -2;
+	PaletteSetTemple2026;
+	gr.fp_wall_paper = &ThemeWallPaper;
+	fp_theme_update32 = &ThemeUpdate32;
+	LFBFlush;
+}
+
+public U0 ThemeInit()
+{
+	ThemeOn;
+	Spawn(&ThemeTask, NULL, "Theme",, sys_task);
+}

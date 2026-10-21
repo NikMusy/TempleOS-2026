@@ -1,0 +1,54 @@
+//TempleOS 2026: домашний HomeSys. Подключает тему и открывает одно окно по центру.
+
+#include "~/Theme/Theme"
+
+I64 home_cascade = 0;
+
+U0 UserStartUp()
+{//Run each time a user a spawned
+	I64 l, t;
+
+	DocTermNew;
+	//новые окна каскадом по центру, между панелью и доком
+	l = TEXT_COLS / 2 - 60 + home_cascade % 6 * 3;
+	t = 12 + home_cascade % 6 * 3;
+	home_cascade++;
+	WinHorz(l, l + 120);
+	WinVert(t, t + 75);
+	LBts(&Fs->display_flags, DISPLAYf_SHOW);
+	WinToTop;
+	WinZBufUpdate;
+}
+
+U0 ServerStartUp()
+{//Run each time a server task is spawned.
+	DocTermNew;
+	LBts(&Fs->display_flags, DISPLAYf_SHOW);
+	WinToTop;
+	WinZBufUpdate;
+}
+
+U0 StartUpTasks()
+{
+	CTask *user;
+
+	try
+		ThemeInit;
+	catch
+	{
+		Fs->catch_except = TRUE;
+		ThemeOff;
+	}
+	LBtr(&sys_task->display_flags, DISPLAYf_SHOW); //окно системной задачи прячем под панель
+	WinZBufUpdate;
+	user = User;
+	WinHorz(TEXT_COLS / 2 - 64, TEXT_COLS / 2 + 64, user);
+	WinVert(14, TEXT_ROWS - 26, user);
+	WinToTop(user);
+	XTalk(user, "Cd; #include \"Once\";\n");
+	Silent; //no output to screen
+	ACInit("/*;!*/Bible.TXT;!*/Clementine.TXT;!*/PCIDevices.DD;!*/HTML/*;!*/ChangeLog.DD");
+	Silent(OFF);
+}
+
+StartUpTasks;
